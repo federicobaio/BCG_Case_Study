@@ -1,0 +1,822 @@
+---
+title: "Group 9: Six Sigma"
+author: "Egle Caudullo, Andrea Bianco, Federico Baio, Alessio Pistone, Alice Bianchi, Festus Udealor"
+output:
+  pdf_document: 
+    df_print: paged
+    toc: true
+    toc_depth: 4
+latex_engine: xelatex
+geometry: "margin = 2.5cm"
+mainfont: Times New Roman
+---
+
+\newpage
+
+# The libraries
+Here, a list of the libraries available in `R` that we have used in our analysis:
+```{r, results='hide', message=FALSE}
+library(tidyverse)     
+library(rstatix)       
+library(cluster)       
+library(gridExtra)     
+library(grid)          
+library(caret)         
+library(knitr)         
+library(DescTools)     
+library(rmarkdown)     
+library(scales)        
+library(gbm)           
+library(glmnet)        
+library(randomForest)  
+library(tree)          
+library(tidytext)      
+library(tm)            
+library(RColorBrewer)  
+library(wordcloud)     
+library(xgboost)       
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(e1071)
+library(kableExtra)
+library(colorspace)
+library(lsa)
+```
+
+\vfill
+Note:  most of the results we obtained are shown through tables, created solely for aesthetic purposes. However, the values are the ones we obtained by running the code in `R`.
+\newpage
+
+# The datasets
+The datasets we worked on are the `ABCTelco_clients` dataset and the `ABCTelco_complaints` dataset. Both of them contains information on the customers of a telecom company. Our goal is to merge these two datasets and combine the information that they provide by defining models that are able to predict whether the customer has left the company.\
+We begin with data loading and preprocessing, then move to variable analysis and modeling.
+
+# The clients dataset 
+## Importing the data
+We loaded the dataset `ABCTelco_clients.csv`. The dataset contains informations on 7043 clients of a telecom company. \
+```{r}
+clients <- read.csv("ABCTelco_clients.csv")
+```
+
+## The format transformation
+
+We observed that many variables in our dataset were in `character` format, while in reality, they are categorical variables.\
+For this reason, we created the `convert_chr_to_factor` function, which allowed us to quickly change their format and transform all the `character` variables into `factor` variables.\
+The `SeniorCitizen` variable, initially `numeric`, was also transformed into a `factor`.\
+Finally, we transformed the response variable `Churn` (which initially contained "*Yes*" and "*No*") into a `numeric` variable, where 1 represents "*Yes*" and 0 represents "*No*".
+```{r, results='hide'}
+convert_chr_to_factor <- function(data) {
+  data %>%
+    mutate(across(where(is.character), as.factor))
+}
+
+clients <- convert_chr_to_factor(clients)
+clients$SeniorCitizen<-as.factor(clients$SeniorCitizen)
+
+clients$Churn <- ifelse(clients$Churn == "Yes", 1, 0)
+```
+
+## NA's treatment
+We then checked for the presence of missing values within our dataset and discovered the presence of 11 NAs in the `TotalCharges` variable. The summary of `df$TotalCharges` is available in the `Table 1`.
+
+```{r na, eval=FALSE}
+summary(clients$TotalCharges)
+```
+
+```{r setup, echo=FALSE, escape = FALSE}
+library(knitr)
+
+valori <- c(18.8, 401.4, 1397.5, 2283.3, 3794.7, 8684.8, 11)
+nomi <- c("Min.", "1st Qu.", "Median", "Mean", "3rd Qu.", "Max.", "NA's")
+
+tabella <- as.data.frame(t(valori))
+colnames(tabella) <- nomi
+
+kable(tabella, caption = "summary of TotalCharges)")
+```
+
+
+To address this issue, we decided to remove all the rows corresponding to these IDs. This decision was straightforward, as the large size of our dataset meant that losing 11 individuals would not result in a significant loss of information.
+
+```{r, results='hide'}
+clients <- clients %>% filter(!is.na(TotalCharges)) 
+```
+
+## Connections and correlations between the variables
+In this section, we analyzed the correlation between the independent variables in our dataset. There are several types of variables: binary, categorical with multiple levels, and numeric. For each possible pair of variables, a subsection was created.
+
+### Numeric - numeric 
+
+Let's start analyzing the correlation between the numerical variables in our dataset.
+We have extracted the numerical variables with the function `sapply`, creating a reduced dataset called `num_var`, containing only `tenure`, `MonthlyCharges`, `TotalCharges` and `Churn`.\
+In `cor_matrix` the correlation between the variables is computed.
+```{r, results='hide'}
+num_var <- clients[, sapply(clients, is.numeric)]
+cor_matrix <- round(cor(num_var, use = "complete.obs", method = "pearson"), 3)
+```
+In the following table the correlation matrix is shown:
+```{r, echo = FALSE}
+kable(cor_matrix, digits = 3, caption = "Correlation Matrix between numerical variables")
+```
+
+As shown in `Table 3`, both `MonthlyCharges` and `tenure` are highly correlated with the variable `TotalCharges`. We will analyze this correlation in more detail later.
+
+
+### Categorical - categorical
+In this section, we analyzed the association between pairs of categorical variables using the function `VCramers`, which we developed. The function takes a set of variables (which do not necessarily have to be categorical) as input and returns a value that measures the association between the input pairs of categorical variables. The value of this statistic ranges from 0 to 1, where a value close to 0 indicates low association between the two variables, and a value near 1 indicates high association.
+```{r, results='hide'}
+VCramers <- function(data) {
+  cat_data <- data[, sapply(data, function(x) is.factor(x))]
+  n <- ncol(cat_data)
+  mat <- matrix(NA, nrow = n, ncol = n)
+  colnames(mat) <- rownames(mat) <- colnames(cat_data)
+  for (i in 1:n) {
+    for (j in 1:n) {
+      if (i == j) {
+        mat[i, j] <- 1
+      } else {
+        table <- table(cat_data[[i]], cat_data[[j]])
+        mat[i, j] <- CramerV(table)
+      }
+    }
+  }
+  return(as.data.frame(mat))
+}
+mat_Cramer <- VCramers(clients)
+mat_Cramer <- round(mat_Cramer, 3)
+```
+Due to the high number of categorical variables in our dataset, we decided to display only those pairs with a statistic value greater than 0.7.
+
+In the following table the pairs of variables with a `association index` greater than 0.7 are displayed.
+```{r, results='hide'}
+threshold <- 0.7
+mat_Cramer[lower.tri(mat_Cramer, diag = TRUE)] <- NA 
+corr_var <- which(abs(mat_Cramer) > threshold, arr.ind = TRUE)
+
+corr_pairs <- data.frame(
+  var1 = rownames(mat_Cramer)[corr_var[, 1]],
+  var2 = colnames(mat_Cramer)[corr_var[, 2]],
+  association = mat_Cramer[corr_var]
+)
+
+corr_pairs <- corr_pairs[order(-corr_pairs$association), ]
+```
+
+```{r, echo = FALSE}
+kable(corr_pairs, digits = 3, caption = "Association Matrix")
+```
+
+### PhoneService and MultipleLines
+
+As seen in `Table 3`, the pair of variables PhoneService and MultipleLines shows a perfect correlation. Upon further analysis, we realized that the first variable indicates whether the customer has a phone line, while the second tells us whether they have 0, 1, or 2 phone lines. Naturally, all customers who have "No" for the variable PhoneService will have the value "0" for the variable MultipleLines.
+
+```{r, eval=FALSE}
+table(clients$PhoneService)
+```
+
+```{r, echo=FALSE, escape = FALSE}
+tabella <- matrix(c(680, 6352), nrow = 1)
+colnames(tabella) <- c("No", "Yes")
+rownames(tabella) <- ""
+kable(tabella, caption = "Phone services table")
+```
+
+```{r, eval=FALSE}
+table(clients$MultipleLines)
+```
+
+```{r, echo=FALSE, escape = FALSE}
+tabella <- matrix(c(3385, 680, 2967), nrow = 1)
+colnames(tabella) <- c("No", "No phone services", "Yes")
+rownames(tabella) <- ""
+kable(tabella, caption = "Multiple lines table")
+```
+
+```{r, eval=FALSE}
+clients %>%
+  filter(PhoneService == "No" &
+      MultipleLines == "No phone service") %>% nrow()
+
+> [1] 680
+```
+
+
+In fact, we can see that there are 680 customers who have "*No*" for the `PhoneService` variable, "*No phone service*" for the `MultipleLines` variable.\ Therefore, the presence of the `PhoneService` variable is redundant, and we can remove it.
+
+
+### Internet - related variables
+
+During our analysis, we also noticed that for the variables `InternetService`, `OnlineSecurity`, `OnlineBackup`, `DeviceProtection`, `TechSupport`, `StreamingTV`, and `StreamingMovies`, there were consistently 1520 customers who selected "*No*" or "*No internet service*".
+
+```{r eval = FALSE}
+summary(clients$InternetService)
+summary(clients$OnlineSecurity)
+summary(clients$OnlineBackup)
+summary(clients$DeviceProtection)
+summary(clients$TechSupport)
+summary(clients$StreamingTV)
+summary(clients$StreamingMovies)
+```
+```{r echo=FALSE}
+internet_summary <- data.frame(
+  Servizio = "InternetService",
+  DSL = 2416,
+  FiberOptic = 3096,
+  No = 1520
+)
+
+# Mostra la tabella
+kable(internet_summary, caption = "Summary of InternetService")
+```
+
+
+```{r, echo=FALSE}
+get_horizontal_table <- function(variable, name) {
+  tbl <- as.data.frame(table(variable))
+  tbl <- pivot_wider(tbl, names_from = variable, values_from = Freq)
+  tbl <- mutate(tbl, Variable = name)
+  return(tbl)
+}
+
+security      <- get_horizontal_table(clients$OnlineSecurity, "OnlineSecurity")
+backup        <- get_horizontal_table(clients$OnlineBackup, "OnlineBackup")
+protection    <- get_horizontal_table(clients$DeviceProtection, "DeviceProtection")
+support       <- get_horizontal_table(clients$TechSupport, "TechSupport")
+streaming_tv  <- get_horizontal_table(clients$StreamingTV, "StreamingTV")
+streaming_mv  <- get_horizontal_table(clients$StreamingMovies, "StreamingMovies")
+
+final_table <- bind_rows(security, backup, protection, support, streaming_tv, streaming_mv)
+
+ final_table <- final_table %>% select(Variable, everything())
+kable(final_table, caption = "Summaries of the internet-related variables")
+```
+
+We then wondered if these were always the same 1520 customers selecting these values, and we found that they were. This characteristic of these variables makes them highly correlated with each other
+
+
+```{r 1520, eval=FALSE}
+clients %>%
+  filter(
+    InternetService == "No" &
+      OnlineSecurity == "No internet service" &
+      OnlineBackup == "No internet service" &
+      DeviceProtection == "No internet service" &
+      TechSupport == "No internet service" &
+      StreamingTV == "No internet service" &
+      StreamingMovies == "No internet service"
+  ) %>%
+  nrow()
+
+> [1] 1520
+```
+
+### OnlineBackup vs OnlineSecurity.
+
+We now analyze the relationship between `OnlineBackup` and `OnlineSecurity`. These two variables appear to be highly correlated, but as we can see, this high correlation is mostly due to the presence of those 1520 customers without internet service.
+
+```{r, results='hide'}
+freq_backup_security <- round(prop.table(table(clients$OnlineBackup,
+                                               clients$OnlineSecurity), 1), 2)
+OnlineBK_NIS <- clients[clients$OnlineBackup != "No internet service", ]
+OnlineSC_NIS <- clients[clients$OnlineSecurity != "No internet service", ]
+
+table(OnlineBK_NIS$OnlineBackup, OnlineSC_NIS$OnlineSecurity)
+```
+
+```{r, echo = FALSE}
+
+kable(freq_backup_security, caption = "Backup vs Security") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                full_width = F, position = "center") %>%
+  row_spec(0, bold = TRUE, color = "white", background = "#4CAF50")
+```
+
+`Table 8` shows that of the people with "*No*" in `OnlineSecurity` the 71%  have "*No*" in `OnlineBackup`, while only 29% have "*Yes*" in `OnlineBackup`.\
+Of course, no one with "*No*" in `InternetService` has either of the two values for `OnlineBackup` or `OnlineSecurity`. SPIEGARE COMMENTO (???)
+
+## Creation of new variables
+
+### The phoneline variable
+
+To improve the interpretation of the variable `MultipleLines`, we decided to create a new categorical variable called `phonelines`, which takes the value 0 if the customer has no phone lines, 1 if they have one, and 2+ if they have multiple phone lines.
+```{r new1, include=TRUE}
+clients$phonelines<- factor(ifelse(clients$MultipleLines == "No phone service",0,
+                                    ifelse(clients$MultipleLines == "No",1,2)))
+```
+
+After creating this variable, we will use it in the analysis, as it provides clearer insight.
+
+### The internet variable
+
+Next, we created the `internet` variable, a binary variable that takes the value "*No*" if the variable `InternetService` equals "*No*", and "*Yes*" in the other two cases (`DSL` and `FiberOptic`). 
+
+```{r new2, include=TRUE}
+clients$internet<-factor(ifelse(clients$InternetService == "No","No","Yes"))
+```
+
+
+We then analyzed the relationship between the newly created variable `internet` and the response variable `Churn`. \
+To do so, we created the frequency table `freq_internet_churn`, which is provided below.\
+The following matrix suggests that customers without internet access rarely churn:
+
+```{r, echo = FALSE}
+freq_internet_churn <- round(prop.table(table(clients$internet, clients$Churn), 1), 2)
+```
+
+
+```{r , echo = FALSE}
+kable(freq_internet_churn) %>%
+ kable_styling(bootstrap_options =  "responsive",full_width = F, position = "center") 
+```
+
+The relative frequencies are computed on the presence or absence of the internet service. From here, one can see that only 7% of the clients without internet service churned. \
+
+```{R barplot, echo = FALSE, fig.width=6, fig.height=4, fig.align='center'}
+churn1 <- clients %>%
+  group_by(internet, Churn) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(internet) %>%
+  mutate(percent = n / sum(n))
+
+
+ggplot(churn1, aes(x = internet, y = percent, fill = as.factor(Churn))) +
+  geom_col(position = "fill", width = 0.6) +
+  scale_y_continuous(labels = percent_format()) +
+  scale_fill_manual(values = c("0" = "green3", "1" = "red3"),
+                    name = "Churn",
+                    labels = c("No (0)", "Yes (1)")) +
+  labs(
+    title = "Churn distribution between clients with and without internet",
+    x = "Has Internet",
+    y = "Percentage"
+  ) +
+  theme_minimal()
+```
+
+### The streaming variable
+
+Due to the high correlation between the variables `StreamingTV` and `StreamingMovies`, we decided to create a new variable called `streaming`, which takes the value 0 if the customer has no streaming service, 1 if they have only one of the two, and 2 if they have both.\
+The code used to compute the new variable is the following:
+```{r streaming, include=TRUE}
+clients$streaming <- (ifelse(clients$StreamingTV =="No" & 
+                          clients$StreamingMovies =="No", 0, 
+                        ifelse(clients$StreamingTV == "Yes" & 
+                                 clients$StreamingMovies == "Yes", 2,
+                               ifelse(clients$StreamingTV == "No" & 
+                                        clients$StreamingMovies == "Yes",1,
+                                      ifelse (clients$StreamingTV == "Yes" & 
+                                                clients$StreamingMovies == "No",1,0)))))
+```
+
+
+### The TotalCharges variable
+
+Eventually, for informational purposes, we discovered that the `TotalCharges` variable is simply the product of `MonthlyCharges` and `tenure`. We confirmed this by creating a new variable called `new_TotalCharges`.
+
+```{r, results='hide'}
+clients$new_TotalCharges <- round(clients$MonthlyCharges * clients$tenure, 2)
+```
+
+We compared the summary of `new_TotalCharges` and `TotalCharges`:
+```{r eval=FALSE}
+summary(clients$TotalCharges)
+summary(clients$new_TotalCharges)
+```
+
+```{r echo=FALSE}
+
+charges_summary <- data.frame(
+  Statistic = c("Min.", "1st Qu.", "Median", "Mean", "3rd Qu.", "Max."),
+  TotalCharges = c(18.8, 401.4, 1397.5, 2283.3, 3794.7, 8684.8),
+  New_TotalCharges = c(18.8, 397.8, 1394.6, 2283.1, 3791.2, 8550.0)
+)
+
+kable(charges_summary, caption = "Comparison between summaries")
+```
+
+
+Then, by plotting this new variable against the existing `TotalCharges` variable, we observed that the computed `new_TotalCharges` shows a perfect correlation with the original variable, confirming that `TotalCharges` and `MonthlyCharges` and `tenure` provide the same information.
+
+```{r plots, echo=FALSE,fig.width=6, fig.height=4, fig.align='center'}
+ggplot(clients, aes(x = TotalCharges, y = new_TotalCharges, color = Churn)) +
+  geom_point(alpha = 0.6) +
+  labs(title = "Actual vs Computed Total Charges", color = "Churn")
+```
+
+\newpage
+# The complaints dataset
+The dataset provides information on the complaints the customers wrote. The dataset contains 1605 observation and three variables: `customerID`, `complaint` and `complaint_number`.
+
+## Sentiment analysis
+We performed a sentiment analysis in order to detect the negative sentiment in a customer complaint.
+We loaded the data:
+```{r}
+complaints <- read.csv("ABCTelco_complaints.csv", stringsAsFactors = FALSE)
+```
+
+We changed the name of the variable `complaint` into `text`, removed the potential NA's and created a dataframe called `complaints_df`, containing only the variables `lines` and `text`.  
+```{r, results='hide'}
+texts <- complaints$complaint
+texts <- texts[!is.na(texts) & texts != ""]
+complaints_df <- tibble(line = 1:length(texts), text = texts)
+```
+Here, the initial part of the dataframe is displayed: 
+```{r, eval = FALSE}
+head(complaints_df)
+```
+```{r, echo=FALSE}
+knitr::kable(head(complaints_df))
+```
+
+We then added to the dataframe the variable costumerID.\
+(Note: since the order of complaints is unchanged from `complaints` to `complaints_df`, each complaint can still be correctly matched to its `customerID` by simply adding the variable.)
+```{r, results='hide'}
+comp_cust <- complaints_df %>% 
+  mutate(customerID = complaints$customerID)
+```
+
+We then tokenized the text into words, meaning that each complaint was divided into single words.\
+In the table below the first rows of `complaints_words` are reported:
+
+```{r, results='hide'}
+complaints_words <- comp_cust %>%
+  unnest_tokens(word, text) 
+head(complaints_words)
+```
+```{r, echo=FALSE}
+knitr::kable(head(complaints_words))
+```
+
+We proceeded with the removal of the *stop words*: common words but useless for the sentimental analysis, just as adverbs or conjunctions.\
+We loaded the `stop_words` from the package `tidytext` and with an `anti_join` we removed such words from the dataset.
+```{r, results='hide'}
+data("stop_words")  
+complaints_words_clean <- complaints_words %>%
+  anti_join(stop_words, by = "word")
+```
+
+From the `tidytext` package we have loaded the `bing` lexicon, that contains thousands of words, each labeled with a sentiment: either *positive* or *negative*
+```{r, results='hide'}
+bing_sentiments <- get_sentiments("bing") 
+head(bing_sentiments)
+```
+
+```{r, echo=FALSE}
+knitr::kable(head(bing_sentiments))
+```
+
+We joined our words from `complaints_words_clean`  with the sentiment labels from `bing_sentiments`. In the table below the initial part of `complaints_sentiment` is displayed.
+```{r, results='hide'}
+complaints_sentiment <- complaints_words_clean %>%
+  inner_join(bing_sentiments, by = "word")
+head(complaints_sentiment)
+```
+```{r, echo=FALSE}
+knitr::kable(head(complaints_sentiment))
+```
+
+We associated to each complaint a numerical measure (the `sentiment_score`) based on the difference between the number of positive and negative words it contains.
+```{r, results='hide'}
+complaint_scores <- complaints_sentiment %>%
+  count(line, sentiment) %>%
+  pivot_wider(names_from = sentiment, values_from = n, values_fill = 0) %>%
+  mutate(sentiment_score = positive - negative)
+```
+
+we then merged `complaint_score` with `complaint_df`, in order to associate the computed scores to original complaints.
+```{r, results='hide'}
+final_sentiment <- complaints_df %>%
+  left_join(complaint_scores, by = "line") %>%
+  mutate(sentiment_score = ifelse(is.na(sentiment_score), 0, sentiment_score))
+```
+
+
+## Merging the datasets
+In this section we merged the `ABCTelco_clients` dataset and the `final_sentiment` dataframe. \
+All the steps are described below.
+
+First of all, in the original dataset `complaints`, we renamed the variable `complaint` to `text`, so that it matched the variable name in the `final_sentimen` data frame. 
+```{r, results='hide'}
+complaints1 <- complaints %>% 
+  rename(text = complaint) %>% 
+  select(-complaint_number)
+head(complaints1)
+```
+
+We then added the `customerID` variable to the `final_sentimen` data frame performing a `left_join` and using as *key* the variable `text`, common to both the dataframes.
+```{r, results='hide'}
+sentiment_id <- final_sentiment %>% 
+  left_join(complaints1, by = "text")
+```
+
+We kept only the `customerID` and `sentiment_score` variables:
+```{r, results='hide'}
+sentiment_id1 <- sentiment_id %>% 
+  select(c(customerID, sentiment_score))
+head(sentiment_id1)
+```
+
+```{r, echo=FALSE}
+knitr::kable(head(sentiment_id1))
+```
+
+To merge `sentiment_id1` with the `clients` dataset, the variable `customerID` must serve as a *key*. To achieve this, we performed a `group_by` operation to group all the data based on the values of `customerID`. We then computed two variables: `score`, the sum of the scores associated with each individual, and `n_complaints`, which indicates how many complaints a person has written.\
+Clearly, the more negative the score, the more unsatisfied the customer is; conversely, the more positive the score, the more satisfied the customer is.\
+Customers with a score equal to zero are considered neutral.
+
+```{r, results='hide'}
+sentiment_group <- sentiment_id1 %>% 
+  group_by(customerID) %>% 
+  summarise(score = sum(sentiment_score), n_complaints = n())
+head(sentiment_group)
+```
+
+```{r, echo=FALSE}
+knitr::kable(head(sentiment_group))
+```
+
+
+creation of the variable weighted_score, which is a score built as a weighted mean in which each sentiment score is weighted by the number of tickets sent.
+```{r}
+sentiment_group2 <- sentiment_group %>% 
+  mutate(weighted_score = (score*n_complaints)/sum(n_complaints)*100)
+```
+
+Finally, we merged the `clients` and the `sentiment_group2` datasets, using the variable `customerID` as a *key*. Given that not all the customers present in the `clients` dataset have left a complaint (the `clients` dataset contains 7043 observations while `sentiment_group2` only 704), we had to specify to put 0 instead of NA in the `score`, `n_complaints` and `weighted_score` variables. 
+
+```{r, results='hide'}
+df <- clients %>% 
+  full_join(sentiment_group2, by = "customerID") %>% 
+  mutate(score = replace_na(score, 0), 
+         n_complaints = replace_na(n_complaints, 0),
+         weighted_score = replace_na(weighted_score, 0)) 
+```
+
+We wrote a new csv file, containing the merged dataset:
+```{r, eval=FALSE}
+write_csv(df, "clientcomplain.csv")
+```
+
+## Topic modeling
+For information purposes, we computed the topic analysis. \
+
+Starting from the `complaint` variable of the `complaints` dataset, we prepared a, `corpus`, a list of documents, by transforming all the characters to lowercase, removing punctuation and stopwords and performing the stemming.
+```{r, message = FALSE, warning=FALSE, message=FALSE}
+texts <- complaints$complaint
+corpus <- Corpus(VectorSource(texts))
+corpus <- tm_map(corpus, tolower)
+corpus <- tm_map(corpus, removePunctuation)
+corpus <- tm_map(corpus, function(x) removeWords(x, stopwords("english")))
+corpus <- tm_map(corpus, stemDocument, language = "english")
+```
+
+We then proceeded with the latent semantic analysis.\
+The object `td.mat` is a matrix counting how many times the terms are used in each document.
+```{r, message = FALSE, warning=FALSE, message=FALSE}
+td.mat <- as.matrix(TermDocumentMatrix(corpus))
+td.mat<-t(td.mat)
+out=svd(td.mat)
+```
+In the graph below we can analyze the behaviour of the explained variance as the number of topics increases:
+```{r, fig.width=6, fig.height=4, fig.align='center'}
+plot(out$d^2 / sum(out$d^2), type = "b", 
+     main = "Explained Variance by Topic", 
+     ylab = "Variance", xlab = "Number of Topics");grid()
+```
+
+More specifically, the percentage of explained variance by the first three components is 27.9%: 
+```{r, results='hide', message=FALSE}
+perc_var_3 <- sum(out$d[1:3]^2) / sum(out$d^2) * 100
+paste0(round(perc_var_3, 2), "%") # "27.9%"
+```
+Let's see how many components are needed to explain at least the 70% of the variability:
+
+```{r, results='hide'}
+var_of_compon <- out$d^2 / sum(out$d^2)
+cum_var <- cumsum(var_of_compon)
+n_components <- which(cum_var >= 0.7)[1]
+n_components #54
+```
+
+Indeed, the percentage of variance explained by first 54 components is:
+```{r, results='hide'}
+perc_var_54 <- sum(out$d[1:54]^2) / sum(out$d^2) * 100
+paste0(round(perc_var_54, 2), "%") # 70.24%
+```
+
+We obtained that 54 topics explain the 70% of the variability.\
+There appears to be a substantial number of topicsaccounting for a significant portion of dataset's variability.
+
+
+\newpage
+
+# Analysis on the full merged dataset
+We loaded the merged dataset `clientcomplain` and considered the variable `customerID` as a *key* that identifies the customers.\
+We removed the `customerID` and the `new_TotalCharges` variables and coverted the remaining variables into `factor` variables.
+```{r, results='hide', message = FALSE, warning=FALSE}
+df <- read_csv("clientcomplain.csv")
+rownames(df) <- df$customerID 
+df$customerID <- NULL
+df$new_TotalCharges <- NULL
+
+convert_chr_to_factor <- function(data) {
+  data %>%
+    mutate(across(where(is.character), as.factor))
+}
+df <- convert_chr_to_factor(df)
+df$SeniorCitizen<-as.factor(df$SeniorCitizen)
+df$Churn<-as.factor(df$Churn)
+df$streaming<-as.factor(df$streaming)
+df$phonelines<-as.factor(df$phonelines)
+str(df)
+```
+
+## The significance of the variables
+We performed a logistic regression including all the variables of our dataset in order to identify the significant ones. \
+The results are available in `Table 17`.
+```{r, results='hide', message=FALSE}
+formula0 <- as.formula("Churn ~ .") 
+```
+
+```{r, results='hide'}
+logistic <- glm(formula0, data = df, family = "binomial")
+summary(logistic)
+```
+
+```{r, echo = FALSE}
+library(knitr)
+
+# Dataframe con i coefficienti, inclusi gli NA
+coefs <- data.frame(
+  Term = c("(Intercept)", "genderMale", "SeniorCitizen1", "PartnerYes", "DependentsYes", "tenure", "PhoneServiceYes",
+           "MultipleLinesNophoneservice", "MultipleLinesYes", "InternetServiceFiberoptic", "InternetServiceNo",
+           "OnlineSecurityNointernetservice", "OnlineSecurityYes", "OnlineBackupNointernetservice", "OnlineBackupYes",
+           "DeviceProtectionNointernetservice", "DeviceProtectionYes", "TechSupportNointernetservice", "TechSupportYes",
+           "StreamingTVNointernetservice", "StreamingTVYes", "StreamingMoviesNointernetservice", "StreamingMoviesYes",
+           "ContractOneyear", "ContractTwoyear", "PaperlessBillingYes", "PaymentMethodCreditcard(automatic)",
+           "PaymentMethodElectroniccheck", "PaymentMethodMailedcheck", "MonthlyCharges", "TotalCharges",
+           "phonelines1", "phonelines2", "internetYes", "streaming1", "streaming2", "score", "n_complaints", "weighted_score"),
+  Estimate = c(1.2027, -0.01085, 0.1976, 0.00406, -0.1512, -0.05813, 0.2933,
+               NA, 0.4714, 1.9467, -1.9879,
+               NA, -0.1485, NA, 0.0513,
+               NA, 0.1787, NA, -0.1569,
+               NA, 0.6654, NA, 0.6721,
+               -0.6371, -1.3640, 0.3729, -0.09967,
+               0.2908, -0.08809, -0.04759, 0.0003026,
+               NA, NA, NA, -0.1135, NA, -0.5047, 0.3947, 1.5391),
+  `Std. Error` = c(0.8396, 0.0665, 0.0868, 0.0796, 0.0919, 0.00639, 0.6684,
+                   NA, 0.1821, 0.8224, 0.8317,
+                   NA, 0.1838, NA, 0.1806,
+                   NA, 0.1815, NA, 0.1858,
+                   NA, 0.3367, NA, 0.3363,
+                   0.1105, 0.1800, 0.0766, 0.1168,
+                   0.0969, 0.1182, 0.0327, 0.0000728,
+                   NA, NA, NA, 0.0796, NA, 0.0846, 0.0648, 0.4020),
+  `z value` = c(1.433, -0.163, 2.277, 0.051, -1.645, -9.101, 0.439,
+                NA, 2.588, 2.367, -2.390,
+                NA, -0.808, NA, 0.284,
+                NA, 0.985, NA, -0.845,
+                NA, 1.976, NA, 1.998,
+                -5.763, -7.576, 4.871, -0.853,
+                3.000, -0.745, -1.455, 4.156,
+                NA, NA, NA, -1.427, NA, -5.965, 6.091, 3.828),
+  `p-value` = c(0.152, 0.870, 0.0228, 0.959, 0.100, "<2e-16", 0.661,
+                 NA, 0.0097, 0.0179, 0.0168,
+                 NA, 0.419, NA, 0.776,
+                 NA, 0.325, NA, 0.398,
+                 NA, 0.0481, NA, 0.0457,
+                 "8.25e-09", "3.56e-14", "1.11e-06", 0.393,
+                 0.0027, 0.456, 0.146, "3.24e-05",
+                 NA, NA, NA, 0.154, NA, "2.45e-09", "1.12e-09", "0.000129")
+)
+
+# Stampa la tabella
+kable(coefs, caption = "Results of the logistic regression", digits = 5)
+
+```
+
+\newpage 
+
+# Models for prediction
+In this section we tried to test our dataset on different models (here we report only the best ones computationally and with respect to the misclassification error level) to see which model could better predict the Churn rate.\
+On all 4 models shown here we performed a 5 fold CV, to make sure to have a concrete and certain prediction on all the observations of the dataset. \
+We set a seed (`123`) to allow reproducibility.
+```{r, eval=FALSE}
+set.seed(123)
+k=5
+n<-nrow(df)
+folds<-sample(1:k,n,T)
+err.cv.logistic<-NULL
+err.cv.lasso<-NULL
+err.cv.boosting<-NULL
+err.cv.rf<-NULL
+```
+## Logistic model
+```{r, eval=FALSE}
+for (i in 1:k){
+  x.train<-df[folds!=i,]
+  x.test<-df[folds==i,]
+  out.log<-glm(Churn~.,data=x.train,family="binomial")
+  phat.log<-predict(out.log,newdata=x.test,type="response") 
+  pred.log<-ifelse(phat.log>0.5,1,0)
+  err.cv.logistic[i]<-mean(pred.log!=x.test$Churn)
+}
+print("LOGISTIC")
+mean(err.cv.logistic)
+```
+## Lasso model
+```{r, eval=FALSE}
+for (i in 1:k){
+  x.train<-df[folds!=i,]
+  x.test<-df[folds==i,]
+  x.train.mat<-model.matrix(Churn~.,data=x.train)[,-1]
+  y.train<-x.train$Churn
+  cv.lasso<-cv.glmnet(x.train.mat,y.train,family ="binomial",alpha = 1)
+  x.test.mat<-model.matrix(Churn~.,data=x.test)[,-1]
+  phat.lasso<-predict(cv.lasso,newx=x.test.mat,s="lambda.min",type="response")
+  pred.lasso<-ifelse(phat.lasso>0.5,1,0)
+  err.cv.lasso[i]<-mean(pred.lasso!=x.test$Churn)
+}
+print("LASSO")
+mean(err.cv.lasso)
+```
+## Boosting with tuning
+```{r, eval=FALSE}
+numb<-c(300,400,500,600,700)
+depths<-c(1, 2, 3)
+shrinkages<-c(0.01, 0.05, 0.1)
+grid<-expand.grid(n.trees=numb,depth=depths,shrink=shrinkages)
+err.grid.selection<-matrix(NA,nrow=k,ncol=nrow(grid))
+df$Churn<-as.numeric(df$Churn)-1
+for (i in 1:k){
+  x.train<-df[folds!=i,]
+  x.test<-df[folds==i,]
+  folds2<-sample(1:k,nrow(x.train),replace=T)
+  for (s in 1:k){
+    cv.train<-x.train[folds2!=s,]
+    cv.test<-x.train[folds2==s,]
+    for (j in 1:nrow(grid)){
+      boost.out<-gbm(Churn~.,data=cv.train,distribution = "bernoulli",
+                     n.trees=grid$n.trees[j],
+                     interaction.depth=grid$depth[j],
+                     bag.fraction=1,shrinkage=grid$shrink[j])
+      phat.grid<-predict(boost.out,newdata=cv.test,n.tree=grid$n.trees[j],
+                         type="response")
+      pred.grid<-ifelse(phat.grid>0.5,1,0)
+      err.grid.selection[s,j]<-mean(pred.grid!=cv.test$Churn)
+    }
+  }
+  best.idx<-which.min(colMeans(err.grid.selection))
+  best.params<-grid[best.idx, ]
+  boost.out<-gbm(Churn~.,data=x.train,distribution = "bernoulli",
+                 n.trees=best.params$n.trees,
+                 interaction.depth=best.params$depth,bag.fraction = 1,
+                 shrinkage=best.params$shrink)
+  phat.boost<-predict(boost.out,newdata=x.test,
+                      n.tree=best.params$n.trees,type="response")
+  pred.boosting<-ifelse(phat.boost>0.5,1,0)
+  err.cv.boosting[i]<-mean(pred.boosting!=x.test$Churn)
+}
+print("BOOSTING")
+mean(err.cv.boosting)
+```
+## Random forest
+```{r, eval=FALSE}
+df$Churn<-as.factor(df$Churn)
+for (i in 1:k){
+  x.train<-df[folds!=i,]
+  x.test<-df[folds==i,]
+  y.train<-df[folds!=i,]$Churn
+  y.test<-df[folds==i,]$Churn
+  x.train$Churn<-as.factor(x.train$Churn)
+  rf.clas<-randomForest(Churn~.,data=x.train,importance=TRUE, ntree=300)
+  pred.rf<-predict(rf.clas,newdata=x.test,type="response")
+  err.cv.rf[i]<-mean(pred.rf!=y.test)
+}
+print("RANDOM FOREST")
+mean(err.cv.rf)
+
+```
+
+## Results
+In the table below the missclassification error of each model is printed: 
+
+```{r, echo = FALSE}
+error_table <- data.frame(
+  Model = c("Logistic", "Lasso", "Boosting", "Random Forest"),
+  Misclassification_Error = c(0.1857838, 0.1846337, 0.1870312, 0.1892892)
+)
+
+# Stampa la tabella con kable
+kable(error_table, caption = "Misclassification Error for each model")
+```
+
+
+
+
+The first two models, namely logistic and lasso are clearly seen as those that return the lowest errors, with a misclassification error of 0.185 and 0.184 respectively. This small improvement is probably due to the penalty that the lasso introduces, managing to bring to zero some of the coefficients of the predictors.\
+The second approach we tried is that of trees, respectively with boosting and random forest. Neither of these two models can improve the misclassification error, even with (as in the case of boosting) tuning on almost all possible parameters.\
+Additional models (such as svm, knn, bagging, etc.) return even higher errors, not making them noteworthy either.\
+Although it may seem intelligent to try a stacking or assembling approach, one can quickly verify how the predictions of the models are wrong on the same observations, looking at the correlation of the prediction, which for the 4 models remains very high, thus making it computationally unconvenient compared to the (not even certain) misclassification error reduction.
