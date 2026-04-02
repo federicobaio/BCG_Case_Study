@@ -34,3 +34,4 @@ The analysis confirmed that while "tenure" and "contract type" are huge factors,
 * `final report.Rmd`: The source code. Everything from data cleaning to final model tuning is here for full transparency.
 * `ABCTelco_clients`: data
 * `ABCTelco_complaints`: complaints
+* `Summary BCG X`: summary of the project
